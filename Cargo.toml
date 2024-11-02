@@ -2,6 +2,7 @@
 name = "ask_rs"
 version = "0.1.0"
 edition = "2021"
+authors = ["Rodrigo Ourique"]
 
 [dependencies]
 clap = { version = "4.1", features = ["derive"] }

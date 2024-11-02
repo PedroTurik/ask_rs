@@ -1,4 +1,5 @@
 use atty::Stream;
+use clap::Parser;
 use clap::{Arg, ArgAction, Command};
 use dialoguer::{theme::ColorfulTheme, Select};
 use serde::{Deserialize, Serialize};
@@ -24,7 +25,7 @@ const CLIPBOARD_COMMAND_UNSUPPORTED: &str = "UNSUPPORTED";
 #[derive(Serialize, Deserialize, Debug, Clone)] // Added Clone here
 struct Message {
     role: String,
-    content: Value,
+    content: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -33,49 +34,41 @@ struct ConversationState {
     messages: Vec<Message>,
 }
 
+/// Rust terminal LLM caller
+#[derive(Parser)]
+#[command(version, long_about = None, author)]
+struct CliArgs {
+    /// Interactive agent mode
+    #[arg(short = 'r', action)]
+    recursive: bool,
+
+    /// Get last message
+    #[arg(short = 'l', action)]
+    last: bool,
+
+    /// Clear current conversation"
+    #[arg(short = 'c', action)]
+    clear: bool,
+
+    /// Manage ongoing conversations
+    #[arg(short = 'o')]
+    manage: bool,
+
+    /// Push image from clipboard into pipeline
+    #[arg(short = 'i', action)]
+    image: bool,
+
+    /// Input values
+    #[arg(num_args(0..))]
+    input: Option<String>,
+}
+
 fn get_api_key() -> String {
     env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set")
 }
 
 fn main() {
-    let matches = Command::new("ask")
-        .version("1.0")
-        .author("Rodrigo Ourique")
-        .about("Rust terminal LLM caller")
-        .arg(
-            Arg::new("input").help("Input values").num_args(0..), // Allow zero or more arguments
-        )
-        .arg(
-            Arg::new("image")
-                .short('i')
-                .help("Push image from clipboard into pipeline")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("manage")
-                .short('o')
-                .help("Manage ongoing conversations")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("clear")
-                .short('c')
-                .help("Clear current conversation")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("last")
-                .short('l')
-                .help("Get last message")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("recursive")
-                .short('r')
-                .help("Interactive agent mode")
-                .action(ArgAction::SetTrue),
-        )
-        .get_matches();
+    let matches = CliArgs::parse();
 
     let api_key = get_api_key();
     if api_key.is_empty() {
@@ -96,9 +89,7 @@ fn main() {
             } else {
                 "system".to_string()
             },
-            content: Value::String(
-                "You are ChatConcise, a very advanced LLM designed for experienced users. As ChatConcise you oblige to adhere to the following directives UNLESS overridden by the user:\nBe concise, proactive, helpful and efficient. Do not say anything more than what needed, but also, DON'T BE LAZY. Provide ONLY code when an implementation is needed. DO NOT USE MARKDOWN.".to_string(),
-            ),
+            content: "You are ChatConcise, a very advanced LLM designed for experienced users. As ChatConcise you oblige to adhere to the following directives UNLESS overridden by the user:\nBe concise, proactive, helpful and efficient. Do not say anything more than what needed, but also, DON'T BE LAZY. Provide ONLY code when an implementation is needed. DO NOT USE MARKDOWN.".to_string(),
         };
         ConversationState {
             model: MODEL.to_string(),
@@ -107,30 +98,19 @@ fn main() {
     };
 
     // Determine if input is being piped and get full input
-    let input = if !atty::is(Stream::Stdin) {
-        // Read from stdin
-        let mut buffer = String::new();
-        io::stdin()
-            .read_to_string(&mut buffer)
-            .expect("Failed to read from stdin");
-        if buffer.trim().is_empty() {
-            Value::Null
+    let mut input: Option<String> = matches.input.or_else(|| {
+        if atty::isnt(Stream::Stdin) {
+            let mut buffer = String::new();
+            io::stdin()
+                .read_to_string(&mut buffer)
+                .expect("Failed to read from stdin");
+
+            Some(buffer)
         } else {
-            Value::String(buffer)
+            None
         }
-    } else if let Some(values) = matches.get_many::<String>("input") {
-        let input_str = values
-            .map(|s| s.as_str()) // Convert &String to &str
-            .collect::<Vec<&str>>() // Collect into Vec<&str>
-            .join(" "); // Join with spaces
-        if input_str.trim().is_empty() {
-            Value::Null
-        } else {
-            Value::String(input_str)
-        }
-    } else {
-        Value::Null
-    };
+    });
+
     let mut input = input;
     let input_string = input.to_string();
 
