@@ -1,6 +1,6 @@
 use atty::Stream;
+use base64::prelude::*;
 use clap::Parser;
-use clap::{Arg, ArgAction, Command};
 use dialoguer::{theme::ColorfulTheme, Select};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,7 +11,7 @@ use std::os::unix::process;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
-const MODEL: &str = "o1-mini";
+const MODEL: &str = "gpt-4o-mini";
 const HOST: &str = "api.openai.com";
 const ENDPOINT: &str = "/v1/chat/completions";
 const MAX_TOKENS: u32 = 2048;
@@ -36,7 +36,7 @@ struct ConversationState {
 
 /// Rust terminal LLM caller
 #[derive(Parser)]
-#[command(version, long_about = None, author)]
+#[command(version, long_about = None, author, trailing_var_arg=true)]
 struct CliArgs {
     /// Interactive agent mode
     #[arg(short = 'r', action)]
@@ -60,7 +60,7 @@ struct CliArgs {
 
     /// Input values
     #[arg(num_args(0..))]
-    input: Option<String>,
+    input: Option<Vec<String>>,
 }
 
 fn get_api_key() -> String {
@@ -98,7 +98,7 @@ fn main() {
     };
 
     // Determine if input is being piped and get full input
-    let mut input: Option<String> = matches.input.or_else(|| {
+    let input: Option<String> = matches.input.map(|v| v.join(" ")).or_else(|| {
         if atty::isnt(Stream::Stdin) {
             let mut buffer = String::new();
             io::stdin()
@@ -111,39 +111,40 @@ fn main() {
         }
     });
 
-    let mut input = input;
-    let input_string = input.to_string();
+    let no_input = input.is_none();
 
-    if matches.get_flag("recursive") {
+    let mut input_string = input.unwrap_or_default();
+
+    if matches.recursive {
         handle_recursive_mode(&mut conversation_state, &transcript_path, input_string);
         return;
-    } else if matches.get_flag("manage") && !matches.get_one::<String>("input").is_some() {
+    } else if matches.manage && no_input {
         manage_ongoing_convos(&mut conversation_state, &transcript_path);
         return;
-    } else if matches.get_flag("clear") && !matches.get_one::<String>("input").is_some() {
+    } else if matches.clear && no_input {
         clear_current_convo(&transcript_path);
         return;
-    } else if matches.get_flag("last") && !matches.get_one::<String>("input").is_some() {
+    } else if matches.last && no_input {
         if let Some(last_message) = conversation_state.messages.last() {
-            println!("{}", serde_json::to_string(&last_message.content).unwrap());
+            println!("{}", &last_message.content);
         }
         return;
     }
 
     // Handle image mode
     let clipboard_command = detect_clipboard_command();
-    if matches.get_flag("image") {
-        add_image_to_pipeline(&mut input, &clipboard_command);
+    if matches.image {
+        input_string = add_image_to_pipeline(&input_string, &clipboard_command);
     }
 
-    if input.is_null() {
+    if no_input {
         show_history(&conversation_state);
         return;
     }
 
     // Default case: simple request
     perform_request(
-        input,
+        input_string,
         &mut conversation_state,
         &transcript_path,
         &clipboard_command,
@@ -166,7 +167,7 @@ fn detect_clipboard_command() -> String {
     }
 }
 
-fn add_image_to_pipeline(input: &mut Value, clipboard_command: &str) {
+fn add_image_to_pipeline(input: &str, clipboard_command: &str) -> String {
     if clipboard_command == CLIPBOARD_COMMAND_UNSUPPORTED {
         panic!("Unsupported OS/DE combination. Only Xorg and Wayland are supported.");
     }
@@ -177,13 +178,12 @@ fn add_image_to_pipeline(input: &mut Value, clipboard_command: &str) {
         .output()
         .expect("Failed to execute clipboard command");
 
-    let image_buffer = base64::encode(&output.stdout);
+    let image_buffer = BASE64_STANDARD.encode(&output.stdout);
 
-    let user_text = input.as_str().unwrap_or("");
-    let new_input = serde_json::json!([
+    serde_json::json!([
         {
             "type": "text",
-            "text": user_text,
+            "text": input,
         },
         {
             "type": "image_url",
@@ -192,13 +192,12 @@ fn add_image_to_pipeline(input: &mut Value, clipboard_command: &str) {
                 "detail": VISION_DETAIL,
             }
         }
-    ]);
-
-    *input = new_input;
+    ])
+    .to_string()
 }
 
 fn perform_request(
-    input: Value,
+    input: String,
     conversation_state: &mut ConversationState,
     transcript_path: &PathBuf,
     _clipboard_command: &str, // Prefixed with underscore to indicate intentional unused variable
@@ -221,7 +220,7 @@ fn perform_request(
 
     let client = reqwest::blocking::Client::new();
     let res = client
-        .post(&format!("https://{}{}", HOST, ENDPOINT))
+        .post(format!("https://{}{}", HOST, ENDPOINT))
         .header("Authorization", format!("Bearer {}", get_api_key()))
         .json(&body)
         .send();
@@ -254,7 +253,10 @@ fn process_response(
 
                 println!("{}", content.as_str().unwrap_or(""));
 
-                let assistant_message = Message { role, content };
+                let assistant_message = Message {
+                    role,
+                    content: content.to_string(),
+                };
 
                 conversation_state.messages.push(assistant_message);
 
@@ -289,17 +291,8 @@ fn show_history(conversation_state: &ConversationState) {
         content.push_str(&horizontal_line('▃'));
         content.push_str(&format!("▍{} ▐\n", message.role));
         content.push_str(&horizontal_line('▀'));
-        content.push_str("\n");
-
-        if let Some(text) = message.content.as_str() {
-            content.push_str(text);
-        } else if let Some(array) = message.content.as_array() {
-            if let Some(first_item) = array.get(0) {
-                if let Some(text) = first_item.get("text").and_then(|v| v.as_str()) {
-                    content.push_str(text);
-                }
-            }
-        }
+        content.push('\n');
+        content.push_str(&message.content);
     }
 
     fs::write(&tmp_path, content).expect("Unable to write history file");
@@ -326,7 +319,7 @@ fn handle_recursive_mode(
     loop {
         // Get last AI message to check if it's already a command
         let mut last_message = conversation_state.messages.last().unwrap();
-        let mut response = last_message.content.as_str().unwrap_or("");
+        let mut response = last_message.content.as_str();
 
         // Check if task is complete
         if response.contains("DONE") {
@@ -336,12 +329,12 @@ fn handle_recursive_mode(
 
         // If the last message wasn't a command suggestion, ask for one
         if !response.contains("COMMAND:") {
-            let input = Value::String(format!("Original task: {}. Suggest the next command to run. Format your response as: COMMAND: <command> followed by an explanation. Or say DONE if the task is complete.", user_input));
+            let input = format!("Original task: {user_input}. Suggest the next command to run. Format your response as: COMMAND: <command> followed by an explanation. Or say DONE if the task is complete.");
             perform_request(input, conversation_state, transcript_path, "");
 
             // Update response with new AI message
             last_message = conversation_state.messages.last().unwrap();
-            response = last_message.content.as_str().unwrap_or("");
+            response = last_message.content.as_str();
 
             // If response is updated, we need to check for completion again
             if response.contains("DONE") {
@@ -373,12 +366,12 @@ fn handle_recursive_mode(
                         println!("{}", result);
 
                         // Pass result back to AI
-                        let input = Value::String(result);
+                        let input = result;
                         perform_request(input, conversation_state, transcript_path, "");
                     }
                     Err(e) => {
                         println!("Failed to execute command: {}", e);
-                        let input = Value::String(format!("Command failed: {}", e));
+                        let input = format!("Command failed: {}", e);
                         perform_request(input, conversation_state, transcript_path, "");
                     }
                 }
@@ -388,8 +381,9 @@ fn handle_recursive_mode(
                     .interact()
                     .unwrap_or_default();
 
-                let input = Value::String(
-                    format!("Command was rejected by user.\nFEEDBACK: {}\n\nPlease suggest an alternative.", comment).to_string(),
+                let input = format!(
+                    "Command was rejected by user.\nFEEDBACK: {}\n\nPlease suggest an alternative.",
+                    comment
                 );
                 perform_request(input, conversation_state, transcript_path, "");
             }
@@ -452,7 +446,7 @@ fn manage_ongoing_convos(current_convo: &mut ConversationState, current_transcri
                 });
             let first_message = convo.messages.get(1); // Use get to avoid panicking
             let content = if let Some(msg) = first_message {
-                msg.content.as_str().unwrap_or("")
+                msg.content.as_str()
             } else {
                 ""
             };
