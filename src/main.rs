@@ -10,7 +10,7 @@ use std::os::unix::process;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
-const MODEL: &str = "gpt-4o-mini";
+const MODEL: &str = "o1-mini";
 const HOST: &str = "api.openai.com";
 const ENDPOINT: &str = "/v1/chat/completions";
 const MAX_TOKENS: u32 = 2048;
