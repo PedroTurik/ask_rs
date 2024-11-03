@@ -3,7 +3,6 @@ use base64::prelude::*;
 use clap::Parser;
 use dialoguer::{theme::ColorfulTheme, Select};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::env;
 use std::fs;
 use std::io::{self, Read};
@@ -32,6 +31,18 @@ struct Message {
 struct ConversationState {
     model: String,
     messages: Vec<Message>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct OpenaiApiReturn {
+    choices: Vec<Choices>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Choices {
+    // this is mistyped currentlly, since a message from OPENAI api's return can have null content
+    // see https://platform.openai.com/docs/api-reference/chat/object
+    message: Message,
 }
 
 /// Rust terminal LLM caller
@@ -227,8 +238,11 @@ fn perform_request(
 
     match res {
         Ok(response) => {
-            let data: Value = response.json().unwrap();
-            process_response(&data, conversation_state, transcript_path);
+            let data: OpenaiApiReturn = response.json().unwrap_or_else(|e| {
+                panic!("Error processing API return: \n{e}\n");
+            });
+
+            process_response(data, conversation_state, transcript_path);
         }
         Err(e) => {
             eprintln!("HTTP request error: {}", e);
@@ -237,40 +251,23 @@ fn perform_request(
 }
 
 fn process_response(
-    data: &Value,
+    mut data: OpenaiApiReturn,
     conversation_state: &mut ConversationState,
     transcript_path: &PathBuf,
 ) {
-    if let Some(choices) = data.get("choices") {
-        if let Some(choice) = choices.get(0) {
-            if let Some(message) = choice.get("message") {
-                let content = message.get("content").unwrap_or(&Value::Null).clone();
-                let role = message
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                println!("{}", content.as_str().unwrap_or(""));
-
-                let assistant_message = Message {
-                    role,
-                    content: content.to_string(),
-                };
-
-                conversation_state.messages.push(assistant_message);
-
-                let conversation_json = serde_json::to_string(&conversation_state).unwrap();
-                fs::write(transcript_path, conversation_json)
-                    .expect("Unable to write transcript file");
-            }
-        }
-    } else {
-        eprintln!(
-            "Error processing API return. Full response ahead:\n{}\n",
-            data
-        );
+    if data.choices.is_empty() {
+        panic!(
+            "OPENAI returned choices should not be empty: {}",
+            serde_json::to_string_pretty(&data).unwrap()
+        )
     }
+
+    let choice = data.choices.remove(0);
+    println!("{}", choice.message.content);
+
+    conversation_state.messages.push(choice.message);
+    let conversation_json = serde_json::to_string(&conversation_state).unwrap();
+    fs::write(transcript_path, conversation_json).expect("Unable to write transcript file");
 }
 
 fn clear_current_convo(transcript_path: &PathBuf) {
